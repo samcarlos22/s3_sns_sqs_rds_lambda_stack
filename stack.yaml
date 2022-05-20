@@ -1,0 +1,62 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Resources:
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 'input.image.bucket'
+      AccessControl: BucketOwnerFullControl
+      NotificationConfiguration:
+        TopicConfigurations:
+          - Topic: !Ref SNSTopic
+            Event: 's3:ObjectCreated:*'
+    DependsOn:
+      - SNSTopicPolicy
+
+  TargetBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: 'target.image.bucket'
+
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint:
+            Fn::GetAtt:
+              - "SQSLambda"
+              - "Arn"
+          Protocol: "sqs"
+        - Endpoint:
+            Fn::GetAtt:
+              - "SQSRDS"
+              - "Arn"
+          Protocol: "sqs"
+      TopicName: "NewImageUpload"
+
+  SNSTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: 'sns:Publish'
+            Resource: !Ref SNSTopic
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:s3:::input.image.bucket        
+      Topics:
+        - !Ref SNSTopic
+
+  SQSLambda: 
+    Type: AWS::SQS::Queue
+    
+  SQSRDS: 
+    Type: AWS::SQS::Queue
+
+  DeadLetterQueue: 
+    Type: AWS::SQS::Queue
+
