@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
-
+Transform: AWS::Serverless-2016-10-31
 Resources:
   UploadBucket:
     Type: AWS::S3::Bucket
@@ -12,6 +12,7 @@ Resources:
             Event: 's3:ObjectCreated:*'
     DependsOn:
       - SNSTopicPolicy
+      - SNSTopic
 
   TargetBucket:
     Type: AWS::S3::Bucket
@@ -47,16 +48,59 @@ Resources:
             Resource: !Ref SNSTopic
             Condition:
               ArnEquals:
-                aws:SourceArn: !Sub arn:${AWS::Partition}:s3:::input.image.bucket        
+                aws:SourceArn: !Sub arn:${AWS::Partition}:s3:::input.image.bucket     
       Topics:
         - !Ref SNSTopic
 
   SQSLambda: 
     Type: AWS::SQS::Queue
+    Properties:
+      QueueName: 'SQSLambdaPool'
     
   SQSRDS: 
     Type: AWS::SQS::Queue
+    Properties:
+      QueueName: 'SQSRDSPool'
 
-  DeadLetterQueue: 
-    Type: AWS::SQS::Queue
-
+  SQSQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref SQSLambda
+        - !Ref SQSRDS
+      PolicyDocument:
+        Id: AllowIncomingAccess
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - "sns.amazonaws.com"
+            Action:
+              - sqs:SendMessage
+            Resource:
+              Fn::GetAtt:
+                - SQSLambda
+                - Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn:
+                  Ref: SNSTopic
+          - Effect: Allow
+            Principal:
+              Service:
+                - "sns.amazonaws.com"
+            Action:
+              - sqs:SendMessage
+            Resource:
+              Fn::GetAtt:
+                - SQSRDS
+                - Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn:
+                  Ref: SNSTopic
+    DependsOn:
+      - SQSLambda
+      - SQSRDS
+      - SNSTopic
