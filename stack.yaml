@@ -104,3 +104,105 @@ Resources:
       - SQSLambda
       - SQSRDS
       - SNSTopic
+
+  LambdaLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: '/aws/lambda/logs'
+      RetentionInDays: 3
+
+  LambdaS3:
+    Type: 'AWS::Lambda::Function'
+    DependsOn:
+      - LambdaRole
+      - LambdaLogGroup
+    Properties:
+      FunctionName: 'Lambda_S3_Copy_New_File'
+      Handler: index.handler
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 30
+      TracingConfig:
+        Mode: Active
+      Role:
+        Fn::GetAtt:
+          - LambdaRole
+          - Arn
+      Code:
+        ZipFile: |
+          import json
+          import urllib.parse
+          import boto3
+
+          s3 = boto3.client('s3')
+
+          def lambda_handler(event, context):
+            try:
+                input_bucket = event['Records'][0]['s3']['bucket']['name']
+                file = urllib.parse.unquote_plus(event['Records'][0]['s3']['object']['key'], encoding='utf8')
+                target_bucket = 'target_image_bucket'
+
+                waiter = s3.get_waiter('object_exists')
+                waiter.wait(Bucket=input_bucket, Key=file)
+
+                s3.copy_object(Bucket=target_bucket, Key=file, CopySource=input_bucket)
+            except Exception as e:
+                return e
+
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    DependsOn:
+      - SQSLambda
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: 'lambda_allow_access'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/logs:*:*'
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  Fn::GetAtt:
+                    - SQSLambda
+                    - Arn
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+
+  LambdaS3EventListener:
+    Type: 'AWS::Lambda::EventSourceMapping'
+    DependsOn:
+      - SQSLambda
+      - LambdaS3
+    Properties:
+      BatchSize: 16
+      MaximumBatchingWindowInSeconds: 30
+      Enabled: true
+      EventSourceArn: 
+        Fn::GetAtt:
+          - SQSLambda
+          - Arn
+      FunctionName: 
+        Fn::GetAtt:
+          - LambdaS3
+          - Arn
