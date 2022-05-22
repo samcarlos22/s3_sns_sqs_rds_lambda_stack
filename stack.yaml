@@ -56,11 +56,35 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: 'SQSLambdaPool'
+      VisibilityTimeout: 120
+      RedrivePolicy: 
+        deadLetterTargetArn: 
+          Fn::GetAtt: 
+            - "SQSLambdaDeadLetterQueue"
+            - "Arn"
+        maxReceiveCount: 2
+
+  SQSLambdaDeadLetterQueue: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: 'SQSLambdaDeadLetterQueue'
     
   SQSRDS: 
     Type: AWS::SQS::Queue
     Properties:
       QueueName: 'SQSRDSPool'
+      VisibilityTimeout: 120
+      RedrivePolicy: 
+        deadLetterTargetArn: 
+          Fn::GetAtt: 
+            - "SQSRDSDeadLetterQueue"
+            - "Arn"
+        maxReceiveCount: 2
+
+  SQSRDSDeadLetterQueue: 
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: 'SQSRDSDeadLetterQueue'
 
   SQSQueuePolicy:
     Type: AWS::SQS::QueuePolicy
@@ -105,23 +129,16 @@ Resources:
       - SQSRDS
       - SNSTopic
 
-  LambdaLogGroup:
-    Type: 'AWS::Logs::LogGroup'
-    Properties:
-      LogGroupName: '/aws/lambda/logs'
-      RetentionInDays: 3
-
   LambdaS3:
     Type: 'AWS::Lambda::Function'
     DependsOn:
       - LambdaRole
-      - LambdaLogGroup
     Properties:
       FunctionName: 'Lambda_S3_Copy_New_File'
       Handler: index.handler
       Runtime: python3.7
       MemorySize: 128
-      Timeout: 30
+      Timeout: 120
       TracingConfig:
         Mode: Active
       Role:
@@ -132,6 +149,7 @@ Resources:
         ZipFile: |
           import json
           import boto3
+          import urllib.parse
 
           print('Moving File')
 
@@ -141,16 +159,20 @@ Resources:
               body = json.loads(event['Records'][0]['body'])
               message = json.loads(body['Message'])
               input_bucket = message['Records'][0]['s3']['bucket']['name']
-              filename = message['Records'][0]['s3']['object']['key']
-              
-              copy_source = {
-                  'Bucket': input_bucket,
-                  'Key': filename.replace('+', ' ')
-              }
-              
-              target_bucket = s3.Bucket('target.image.bucket')
-              target_bucket.copy(copy_source, filename.replace('+', ' '))
-
+              target_bucket = 'target.image.bucket'
+              filename = urllib.parse.unquote_plus(message['Records'][0]['s3']['object']['key'], encoding='utf-8')
+              try:
+                copy_source = {
+                    'Bucket': input_bucket,
+                    'Key': filename
+                }
+                
+                target_bucket = s3.Bucket(target_bucket)
+                target_bucket.copy(copy_source, filename)
+              except Exception as e:
+                print(f'Failed to move file { filename } from { input_bucket } to { target_bucket }')
+                print(e)
+                raise e
 
   LambdaRole:
     Type: 'AWS::IAM::Role'
@@ -203,6 +225,8 @@ Resources:
       - LambdaS3
     Properties:
       BatchSize: 16
+      FunctionResponseTypes: 
+        - ReportBatchItemFailures
       MaximumBatchingWindowInSeconds: 30
       Enabled: true
       EventSourceArn: 
