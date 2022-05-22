@@ -56,7 +56,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: 'SQSLambdaPool'
-      VisibilityTimeout: 120
+      VisibilityTimeout: 200
       RedrivePolicy: 
         deadLetterTargetArn: 
           Fn::GetAtt: 
@@ -73,7 +73,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: 'SQSRDSPool'
-      VisibilityTimeout: 120
+      VisibilityTimeout: 200
       RedrivePolicy: 
         deadLetterTargetArn: 
           Fn::GetAtt: 
@@ -174,10 +174,79 @@ Resources:
                 print(e)
                 raise e
 
+  LambdaRDS:
+    Type: 'AWS::Lambda::Function'
+    DependsOn:
+      - LambdaRole
+    Properties:
+      FunctionName: 'Lambda_RDS_Add_New_File'
+      Handler: index.handler
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 120
+      TracingConfig:
+        Mode: Active
+      Role:
+        Fn::GetAtt:
+          - LambdaRole
+          - Arn
+      Code: 
+        ZipFile: |
+          import json
+          import urllib.parse
+          import rds_config
+          import pymysql
+          import sys
+
+          print('Copying File')
+
+          rds_host = rds_config.db_endpoint
+          name = rds_config.db_username
+          password = rds_config.db_password
+          db_name = rds_config.db_name
+          port = 3306
+          INDEX_COUNTER = 0
+
+          try:
+              conn = pymysql.connect(host=rds_host,user=name,
+                                    passwd=password,db=db_name,
+                                    connect_timeout=5,
+                                    cursorclass=pymysql.cursors.DictCursor)
+          except pymysql.MySQLError as e:
+              print(e)
+              sys.exit()
+
+          with conn.cursor() as cur:
+              INDEX_COUNTER = cur.execute("select count * from Images")
+
+          conn.commit()
+
+          def handler(event, context):
+              body = json.loads(event['Records'][0]['body'])
+              message = json.loads(body['Message'])
+              input_bucket = message['Records'][0]['s3']['bucket']['name']
+              filename = urllib.parse.unquote_plus(message['Records'][0]['s3']['object']['key'], encoding='utf-8')
+              
+              try:
+                with conn.cursor() as cur:
+                  INDEX_COUNTER += 1 
+                  cur.execute(
+                    f'insert into Images (ImageID, ImageName, SourcePath, RetouchedPath) values({ INDEX_COUNTER }, { filename }, { input_bucket }, "")'
+                  )
+                    
+                conn.commit()
+            
+                return f'Successfully added file { filename } to the database'
+              except Exception as e:
+                print(f'Failed to add file { filename } to the database')
+                print(e)
+
+
   LambdaRole:
     Type: 'AWS::IAM::Role'
     DependsOn:
       - SQSLambda
+      - SQSRDS
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
@@ -209,9 +278,12 @@ Resources:
                   - sqs:GetQueueAttributes
                   - sqs:ChangeMessageVisibility
                 Resource: 
-                  Fn::GetAtt:
-                    - SQSLambda
-                    - Arn
+                  - Fn::GetAtt:
+                      - SQSLambda
+                      - Arn
+                  - Fn::GetAtt:
+                      - SQSRDS
+                      - Arn
               - Effect: Allow
                 Action:
                   - xray:PutTraceSegments
@@ -238,6 +310,26 @@ Resources:
           - LambdaS3
           - Arn
 
+  LambdaRDSEventListener:
+    Type: 'AWS::Lambda::EventSourceMapping'
+    DependsOn:
+      - SQSRDS
+      - LambdaRDS
+    Properties:
+      BatchSize: 4
+      FunctionResponseTypes: 
+        - ReportBatchItemFailures
+      MaximumBatchingWindowInSeconds: 30
+      Enabled: true
+      EventSourceArn: 
+        Fn::GetAtt:
+          - SQSRDS
+          - Arn
+      FunctionName: 
+        Fn::GetAtt:
+          - LambdaRDS
+          - Arn
+
   RDSInstance:
     Type: AWS::RDS::DBInstance
     Properties:
@@ -246,5 +338,5 @@ Resources:
       MasterUserPassword: ''
       Engine: MySQL
       DBInstanceClass: db.t2.micro
-      PubliclyAccessible: True
+      PubliclyAccessible: true
       AllocatedStorage: "5"
