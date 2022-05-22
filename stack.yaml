@@ -237,3 +237,14 @@ Resources:
         Fn::GetAtt:
           - LambdaS3
           - Arn
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBName: RDSImageDB
+      MasterUsername: admin
+      MasterUserPassword: ''
+      Engine: MySQL
+      DBInstanceClass: db.t2.micro
+      PubliclyAccessible: True
+      AllocatedStorage: "5"
