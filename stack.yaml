@@ -178,6 +178,7 @@ Resources:
     Type: 'AWS::Lambda::Function'
     DependsOn:
       - LambdaRole
+      - PyMySQLLayer
     Properties:
       FunctionName: 'Lambda_RDS_Add_New_File'
       Handler: index.handler
@@ -190,6 +191,8 @@ Resources:
         Fn::GetAtt:
           - LambdaRole
           - Arn
+      Layers:
+        - !Ref PyMySQLLayer
       Code: 
         ZipFile: |
           import json
@@ -205,7 +208,6 @@ Resources:
           password = rds_config.db_password
           db_name = rds_config.db_name
           port = 3306
-          INDEX_COUNTER = 0
 
           try:
               conn = pymysql.connect(host=rds_host,user=name,
@@ -216,31 +218,46 @@ Resources:
               print(e)
               sys.exit()
 
-          with conn.cursor() as cur:
-              INDEX_COUNTER = cur.execute("select count * from Images")
-
-          conn.commit()
 
           def handler(event, context):
               body = json.loads(event['Records'][0]['body'])
               message = json.loads(body['Message'])
               input_bucket = message['Records'][0]['s3']['bucket']['name']
+              target_bucket = 'target.image.bucket'
               filename = urllib.parse.unquote_plus(message['Records'][0]['s3']['object']['key'], encoding='utf-8')
               
               try:
                 with conn.cursor() as cur:
-                  INDEX_COUNTER += 1 
                   cur.execute(
-                    f'insert into Images (ImageID, ImageName, SourcePath, RetouchedPath) values({ INDEX_COUNTER }, { filename }, { input_bucket }, "")'
+                    f'SELECT EXISTS (SELECT 1 FROM Images WHERE ImageName = { filename })'
                   )
-                    
-                conn.commit()
+
+                  if cur:
+                    conn.commit()
+                    return f'The file { filename } already exists in the database'
+
+                  cur.execute(
+                    f'INSERT INTO Images (ImageName, SourcePath, RetouchedPath) VALUES({ filename }, { input_bucket }, default)'
+                  )
+                  conn.commit()
             
                 return f'Successfully added file { filename } to the database'
               except Exception as e:
                 print(f'Failed to add file { filename } to the database')
                 print(e)
 
+  PyMySQLLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      CompatibleRuntimes:
+        - python3.6
+        - python3.7
+      Content:
+        S3Bucket: python.layer.bucket
+        S3Key: pymysql_layer.zip
+      Description: PyMySQL Layer
+      LayerName: PyMySQL_Layer
+      LicenseInfo: MIT
 
   LambdaRole:
     Type: 'AWS::IAM::Role'
@@ -335,7 +352,7 @@ Resources:
     Properties:
       DBName: RDSImageDB
       MasterUsername: admin
-      MasterUserPassword: ''
+      MasterUserPassword: 'dbinstancetest2022'
       Engine: MySQL
       DBInstanceClass: db.t2.micro
       PubliclyAccessible: true
