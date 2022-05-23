@@ -4,12 +4,12 @@ Resources:
   UploadBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: 'input.image.bucket'
+      BucketName: "input.image.bucket"
       AccessControl: BucketOwnerFullControl
       NotificationConfiguration:
         TopicConfigurations:
           - Topic: !Ref SNSTopic
-            Event: 's3:ObjectCreated:*'
+            Event: "s3:ObjectCreated:*"
     DependsOn:
       - SNSTopicPolicy
       - SNSTopic
@@ -17,7 +17,7 @@ Resources:
   TargetBucket:
     Type: AWS::S3::Bucket
     Properties:
-      BucketName: 'target.image.bucket'
+      BucketName: "target.image.bucket"
 
   SNSTopic:
     Type: AWS::SNS::Topic
@@ -36,7 +36,7 @@ Resources:
       TopicName: "NewImageUpload"
 
   SNSTopicPolicy:
-    Type: 'AWS::SNS::TopicPolicy'
+    Type: "AWS::SNS::TopicPolicy"
     Properties:
       PolicyDocument:
         Version: 2012-10-17
@@ -44,47 +44,47 @@ Resources:
           - Effect: Allow
             Principal:
               Service: s3.amazonaws.com
-            Action: 'sns:Publish'
+            Action: "sns:Publish"
             Resource: !Ref SNSTopic
             Condition:
               ArnEquals:
-                aws:SourceArn: !Sub arn:${AWS::Partition}:s3:::input.image.bucket     
+                aws:SourceArn: !Sub arn:${AWS::Partition}:s3:::input.image.bucket
       Topics:
         - !Ref SNSTopic
 
-  SQSLambda: 
+  SQSLambda:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: 'SQSLambdaPool'
+      QueueName: "SQSLambdaPool"
       VisibilityTimeout: 200
-      RedrivePolicy: 
-        deadLetterTargetArn: 
-          Fn::GetAtt: 
+      RedrivePolicy:
+        deadLetterTargetArn:
+          Fn::GetAtt:
             - "SQSLambdaDeadLetterQueue"
             - "Arn"
         maxReceiveCount: 2
 
-  SQSLambdaDeadLetterQueue: 
+  SQSLambdaDeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: 'SQSLambdaDeadLetterQueue'
-    
-  SQSRDS: 
+      QueueName: "SQSLambdaDeadLetterQueue"
+
+  SQSRDS:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: 'SQSRDSPool'
+      QueueName: "SQSRDSPool"
       VisibilityTimeout: 200
-      RedrivePolicy: 
-        deadLetterTargetArn: 
-          Fn::GetAtt: 
+      RedrivePolicy:
+        deadLetterTargetArn:
+          Fn::GetAtt:
             - "SQSRDSDeadLetterQueue"
             - "Arn"
         maxReceiveCount: 2
 
-  SQSRDSDeadLetterQueue: 
+  SQSRDSDeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: 'SQSRDSDeadLetterQueue'
+      QueueName: "SQSRDSDeadLetterQueue"
 
   SQSQueuePolicy:
     Type: AWS::SQS::QueuePolicy
@@ -130,11 +130,11 @@ Resources:
       - SNSTopic
 
   LambdaS3:
-    Type: 'AWS::Lambda::Function'
+    Type: "AWS::Lambda::Function"
     DependsOn:
       - LambdaRole
     Properties:
-      FunctionName: 'Lambda_S3_Copy_New_File'
+      FunctionName: "Lambda_S3_Copy_New_File"
       Handler: index.handler
       Runtime: python3.7
       MemorySize: 128
@@ -175,12 +175,12 @@ Resources:
                 raise e
 
   LambdaRDS:
-    Type: 'AWS::Lambda::Function'
+    Type: "AWS::Lambda::Function"
     DependsOn:
       - LambdaRole
       - PyMySQLLayer
     Properties:
-      FunctionName: 'Lambda_RDS_Add_New_File'
+      FunctionName: "Lambda_RDS_Add_New_File"
       Handler: index.handler
       Runtime: python3.7
       MemorySize: 128
@@ -193,20 +193,24 @@ Resources:
           - Arn
       Layers:
         - !Ref PyMySQLLayer
-      Code: 
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        SubnetIds:
+          - !Ref Subnet
+      Code:
         ZipFile: |
           import json
           import urllib.parse
-          import rds_config
           import pymysql
           import sys
 
           print('Copying File')
 
-          rds_host = rds_config.db_endpoint
-          name = rds_config.db_username
-          password = rds_config.db_password
-          db_name = rds_config.db_name
+          rds_host = ''
+          name = 'admin'
+          password = 'dbinstancetest2022'
+          db_name = 'RDSImageDB'
           port = 3306
 
           try:
@@ -228,14 +232,18 @@ Resources:
               
               try:
                 with conn.cursor() as cur:
+                  cur.execute(f'CREATE TABLE IF NOT EXISTS Images ( ImageID int AUTO_INCREMENT NOT NULL, ImageName varchar(255) NOT NULL default "", SourcePath varchar(255) default "", RetouchedPath varchar(255) default "", PRIMARY KEY (ImageID))')
+                  conn.commit()
+                  
                   cur.execute(
-                    f'SELECT EXISTS (SELECT 1 FROM Images WHERE ImageName = { filename })'
+                    f'SELECT EXISTS (SELECT ImageName FROM Images WHERE ImageName="{ filename }")'
                   )
 
                   if cur:
                     conn.commit()
                     return f'The file { filename } already exists in the database'
-
+                  conn.commit()
+                  
                   cur.execute(
                     f'INSERT INTO Images (ImageName, SourcePath, RetouchedPath) VALUES({ filename }, { input_bucket }, default)'
                   )
@@ -245,6 +253,7 @@ Resources:
               except Exception as e:
                 print(f'Failed to add file { filename } to the database')
                 print(e)
+
 
   PyMySQLLayer:
     Type: AWS::Lambda::LayerVersion
@@ -260,13 +269,13 @@ Resources:
       LicenseInfo: MIT
 
   LambdaRole:
-    Type: 'AWS::IAM::Role'
+    Type: "AWS::IAM::Role"
     DependsOn:
       - SQSLambda
       - SQSRDS
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
@@ -275,13 +284,19 @@ Resources:
             Action:
               - sts:AssumeRole
       Policies:
-        - PolicyName: 'lambda_allow_access'
+        - PolicyName: "lambda_allow_access"
           PolicyDocument:
-            Version: '2012-10-17'
+            Version: "2012-10-17"
             Statement:
               - Effect: Allow
+                Action: ec2:*
+                Resource: "*"
+              - Effect: Allow
+                Action: eds:*
+                Resource: "*"
+              - Effect: Allow
                 Action: s3:*
-                Resource: '*'
+                Resource: "*"
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
@@ -294,7 +309,7 @@ Resources:
                   - sqs:DeleteMessage
                   - sqs:GetQueueAttributes
                   - sqs:ChangeMessageVisibility
-                Resource: 
+                Resource:
                   - Fn::GetAtt:
                       - SQSLambda
                       - Arn
@@ -305,44 +320,44 @@ Resources:
                 Action:
                   - xray:PutTraceSegments
                   - xray:PutTelemetryRecords
-                Resource: '*'
+                Resource: "*"
 
   LambdaS3EventListener:
-    Type: 'AWS::Lambda::EventSourceMapping'
+    Type: "AWS::Lambda::EventSourceMapping"
     DependsOn:
       - SQSLambda
       - LambdaS3
     Properties:
       BatchSize: 16
-      FunctionResponseTypes: 
+      FunctionResponseTypes:
         - ReportBatchItemFailures
       MaximumBatchingWindowInSeconds: 30
       Enabled: true
-      EventSourceArn: 
+      EventSourceArn:
         Fn::GetAtt:
           - SQSLambda
           - Arn
-      FunctionName: 
+      FunctionName:
         Fn::GetAtt:
           - LambdaS3
           - Arn
 
   LambdaRDSEventListener:
-    Type: 'AWS::Lambda::EventSourceMapping'
+    Type: "AWS::Lambda::EventSourceMapping"
     DependsOn:
       - SQSRDS
       - LambdaRDS
     Properties:
       BatchSize: 4
-      FunctionResponseTypes: 
+      FunctionResponseTypes:
         - ReportBatchItemFailures
       MaximumBatchingWindowInSeconds: 30
       Enabled: true
-      EventSourceArn: 
+      EventSourceArn:
         Fn::GetAtt:
           - SQSRDS
           - Arn
-      FunctionName: 
+      FunctionName:
         Fn::GetAtt:
           - LambdaRDS
           - Arn
@@ -352,8 +367,73 @@ Resources:
     Properties:
       DBName: RDSImageDB
       MasterUsername: admin
-      MasterUserPassword: 'dbinstancetest2022'
+      MasterUserPassword: "dbinstancetest2022"
       Engine: MySQL
       DBInstanceClass: db.t2.micro
       PubliclyAccessible: true
       AllocatedStorage: "5"
+      VPCSecurityGroups: 
+        - !Ref SecurityGroup
+      DBSubnetGroupName:
+        Ref: DBSubnetGroup
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: VPC
+      InternetGatewayId:
+        Ref: InternetGateway
+
+  Subnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: "eu-central-1a"
+
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        Ref: VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: "eu-central-1b"
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to client host
+      VpcId: 
+        Ref: VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 0
+          ToPort: 65535
+          CidrIp: 0.0.0.0/0
+
+  DBSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup" 
+    Properties: 
+      DBSubnetGroupDescription: description
+      SubnetIds: 
+        - !Ref Subnet
+        - !Ref Subnet2
+        
+    
