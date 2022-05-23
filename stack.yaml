@@ -18,6 +18,14 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: "target.image.bucket"
+      AccessControl: BucketOwnerFullControl
+      NotificationConfiguration:
+        TopicConfigurations:
+          - Topic: !Ref SNSTopic2
+            Event: "s3:ObjectCreated:*"
+    DependsOn:
+      - SNSTopicPolicy2
+      - SNSTopic2
 
   SNSTopic:
     Type: AWS::SNS::Topic
@@ -34,6 +42,17 @@ Resources:
               - "Arn"
           Protocol: "sqs"
       TopicName: "NewImageUpload"
+
+  SNSTopic2:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint:
+            Fn::GetAtt:
+              - "SQSRDS"
+              - "Arn"
+          Protocol: "sqs"
+      TopicName: "ImageMoved"
 
   SNSTopicPolicy:
     Type: "AWS::SNS::TopicPolicy"
@@ -52,11 +71,28 @@ Resources:
       Topics:
         - !Ref SNSTopic
 
+  SNSTopicPolicy2:
+    Type: "AWS::SNS::TopicPolicy"
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: "sns:Publish"
+            Resource: !Ref SNSTopic2
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:s3:::target.image.bucket
+      Topics:
+        - !Ref SNSTopic2
+
   SQSLambda:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: "SQSLambdaPool"
-      VisibilityTimeout: 200
+      VisibilityTimeout: 210
       RedrivePolicy:
         deadLetterTargetArn:
           Fn::GetAtt:
@@ -73,7 +109,7 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: "SQSRDSPool"
-      VisibilityTimeout: 200
+      VisibilityTimeout: 40
       RedrivePolicy:
         deadLetterTargetArn:
           Fn::GetAtt:
@@ -109,7 +145,7 @@ Resources:
             Condition:
               ArnEquals:
                 aws:SourceArn:
-                  Ref: SNSTopic
+                  - Ref: SNSTopic
           - Effect: Allow
             Principal:
               Service:
@@ -123,11 +159,13 @@ Resources:
             Condition:
               ArnEquals:
                 aws:SourceArn:
-                  Ref: SNSTopic
+                  - Ref: SNSTopic
+                  - Ref: SNSTopic2
     DependsOn:
       - SQSLambda
       - SQSRDS
       - SNSTopic
+      - SNSTopic2
 
   LambdaS3:
     Type: "AWS::Lambda::Function"
@@ -184,7 +222,7 @@ Resources:
       Handler: index.handler
       Runtime: python3.7
       MemorySize: 128
-      Timeout: 120
+      Timeout: 30
       TracingConfig:
         Mode: Active
       Role:
@@ -197,17 +235,16 @@ Resources:
         SecurityGroupIds:
           - !Ref SecurityGroup
         SubnetIds:
-          - !Ref Subnet
+          - !Ref PrivateSubnet
       Code:
         ZipFile: |
-          import json
           import urllib.parse
           import pymysql
           import sys
 
           print('Copying File')
 
-          rds_host = ''
+          rds_host = 'srkkptctytdxvy.cbw7wafbrizg.eu-central-1.rds.amazonaws.com'
           name = 'admin'
           password = 'dbinstancetest2022'
           db_name = 'RDSImageDB'
@@ -225,35 +262,32 @@ Resources:
 
           def handler(event, context):
               body = json.loads(event['Records'][0]['body'])
+              trigger = body['TopicArn']
               message = json.loads(body['Message'])
-              input_bucket = message['Records'][0]['s3']['bucket']['name']
-              target_bucket = 'target.image.bucket'
+              bucket = message['Records'][0]['s3']['bucket']['name']
               filename = urllib.parse.unquote_plus(message['Records'][0]['s3']['object']['key'], encoding='utf-8')
               
-              try:
-                with conn.cursor() as cur:
-                  cur.execute(f'CREATE TABLE IF NOT EXISTS Images ( ImageID int AUTO_INCREMENT NOT NULL, ImageName varchar(255) NOT NULL default "", SourcePath varchar(255) default "", RetouchedPath varchar(255) default "", PRIMARY KEY (ImageID))')
-                  conn.commit()
+              
+              with conn.cursor() as cur:
+                if 'NewImageUpload' in trigger:
+                  cur.execute('SELECT EXISTS (SELECT ImageName FROM Images WHERE ImageName=%s)', filename)
+                  exists = cur.fetchone()
+                  exists = list(exists.values())[0]
                   
-                  cur.execute(
-                    f'SELECT EXISTS (SELECT ImageName FROM Images WHERE ImageName="{ filename }")'
-                  )
-
-                  if cur:
-                    conn.commit()
-                    return f'The file { filename } already exists in the database'
+                  if exists == 1:
+                    print (f'The file { filename } already exists in the database')
+                    return 0
+                    
+                  cur.execute('INSERT INTO Images (ImageName, SourcePath, RetouchedPath) VALUES(%s, %s, %s)', (filename, bucket, 'default'))
                   conn.commit()
-                  
-                  cur.execute(
-                    f'INSERT INTO Images (ImageName, SourcePath, RetouchedPath) VALUES({ filename }, { input_bucket }, default)'
-                  )
-                  conn.commit()
-            
-                return f'Successfully added file { filename } to the database'
-              except Exception as e:
-                print(f'Failed to add file { filename } to the database')
-                print(e)
-
+                    
+                  print (f'Successfully added file { filename } to the database')
+                  return 0
+                    
+                cur.execute('UPDATE Images SET RetouchedPath=%s WHERE ImageName=%s', (bucket, filename))
+                conn.commit()
+                print (f'Successfully update file { filename } entry in the database')
+                return 0
 
   PyMySQLLayer:
     Type: AWS::Lambda::LayerVersion
@@ -372,7 +406,7 @@ Resources:
       DBInstanceClass: db.t2.micro
       PubliclyAccessible: true
       AllocatedStorage: "5"
-      VPCSecurityGroups: 
+      VPCSecurityGroups:
         - !Ref SecurityGroup
       DBSubnetGroupName:
         Ref: DBSubnetGroup
@@ -395,27 +429,84 @@ Resources:
       InternetGatewayId:
         Ref: InternetGateway
 
-  Subnet:
+  PrivateSubnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId:
         Ref: VPC
       CidrBlock: 10.0.1.0/24
-      AvailabilityZone: "eu-central-1a"
+      AvailabilityZone: !Select [0, !GetAZs ]
 
-  Subnet2:
+  PublicSubnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId:
         Ref: VPC
       CidrBlock: 10.0.2.0/24
-      AvailabilityZone: "eu-central-1b"
+      AvailabilityZone: !Select [1, !GetAZs ]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Public
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: Private
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt ElasticIPAddress.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub NAT-${AWS::StackName}
+
+  ElasticIPAddress:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: VPC
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet
+      RouteTableId: !Ref PrivateRouteTable
 
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Allow http to client host
-      VpcId: 
+      VpcId:
         Ref: VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -429,11 +520,9 @@ Resources:
           CidrIp: 0.0.0.0/0
 
   DBSubnetGroup:
-    Type: "AWS::RDS::DBSubnetGroup" 
-    Properties: 
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
       DBSubnetGroupDescription: description
-      SubnetIds: 
-        - !Ref Subnet
-        - !Ref Subnet2
-        
-    
+      SubnetIds:
+        - !Ref PrivateSubnet
+        - !Ref PublicSubnet
